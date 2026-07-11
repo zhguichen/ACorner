@@ -19,6 +19,7 @@ struct ActiveTask: Codable, Equatable {
     var plannedMinutes: Int
     var startedAt: Date
     var plannedEndsAt: Date
+    var linkedTodoID: UUID? = nil
 }
 
 struct TaskRecord: Codable, Identifiable, Equatable {
@@ -33,4 +34,22 @@ struct TaskRecord: Codable, Identifiable, Equatable {
     var additionalDuration: TimeInterval
     var note: String
     var finishKind: FinishKind
+    var linkedTodoID: UUID? = nil
+}
+
+struct TodoItem: Codable, Identifiable, Equatable {
+    var id: UUID
+    var title: String
+    var createdAt: Date
+    var completedAt: Date?
+
+    var isCompleted: Bool { completedAt != nil }
+}
+
+enum TodoProgress {
+    static func fraction(for todos: [TodoItem]) -> Double {
+        guard !todos.isEmpty else { return 0 }
+        let completedCount = todos.count { $0.isCompleted }
+        return Double(completedCount) / Double(todos.count)
+    }
 }

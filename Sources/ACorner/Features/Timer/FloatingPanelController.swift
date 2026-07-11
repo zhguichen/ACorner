@@ -21,21 +21,20 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private let model: TaskSessionModel
     private let panel: FloatingPanel
     private var displayMode: DisplayMode = .collapsed
-    private var collapseWorkItem: DispatchWorkItem?
+    private var presentationWorkItem: DispatchWorkItem?
+    private var dismissalWorkItem: DispatchWorkItem?
     private var localClickMonitor: Any?
     private var globalClickMonitor: Any?
     private var dotCenter: CGPoint
 
-    private let dotSize: CGFloat = 22
-    private let cardWidth: CGFloat = 312
-    private let cardHeight: CGFloat = 300
-    private let gap: CGFloat = 10
+    private let cardPresentationDuration: TimeInterval = 0.24
+    private let cardDismissalDuration: TimeInterval = 0.16
 
-    init(model: TaskSessionModel) {
+    init(model: TaskSessionModel, store: RecordStore, openSettings: @escaping () -> Void) {
         self.model = model
         self.dotCenter = Self.savedDotCenter() ?? Self.defaultDotCenter()
         self.panel = FloatingPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 22, height: 22),
+            contentRect: NSRect(x: 0, y: 0, width: FloatingMetrics.anchorWidth, height: FloatingMetrics.anchorHeight),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -54,7 +53,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         panel.isMovable = false
         panel.delegate = self
         panel.title = "一隅 ACorner"
-        panel.contentView = NSHostingView(rootView: FloatingSurface(model: model, controller: self))
+        panel.contentView = NSHostingView(
+            rootView: FloatingSurface(model: model, controller: self, store: store, openSettings: openSettings)
+        )
 
         model.onPhaseChanged = { [weak self] phase in
             self?.respond(to: phase)
@@ -63,7 +64,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             self?.collapse()
         }
         installOutsideClickMonitor()
-        relayout(animated: false)
+        relayout()
     }
 
     func show() {
@@ -71,11 +72,9 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     func hoverStarted() {
-        collapseWorkItem?.cancel()
         guard displayMode == .collapsed else { return }
         displayMode = .transient
-        model.isCardPresented = true
-        relayout()
+        presentCard()
     }
 
     func hoverEnded() {
@@ -83,28 +82,34 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     func dotActivated() {
-        collapseWorkItem?.cancel()
         displayMode = .fixed
-        model.isCardPresented = true
-        model.focusRequest += 1
-        relayout()
+        presentCard(focusAfterPresentation: true)
         activateForTextEntry()
     }
 
     func movedDot(by delta: CGSize) {
         guard delta.width != 0 || delta.height != 0 else { return }
-        let visible = screenForDot().visibleFrame.insetBy(dx: dotSize / 2, dy: dotSize / 2)
+        let visible = screenForDot().visibleFrame.insetBy(dx: FloatingMetrics.anchorWidth / 2, dy: FloatingMetrics.anchorHeight / 2)
         dotCenter.x = min(max(dotCenter.x + delta.width, visible.minX), visible.maxX)
         dotCenter.y = min(max(dotCenter.y + delta.height, visible.minY), visible.maxY)
         UserDefaults.standard.set([dotCenter.x, dotCenter.y], forKey: "floatingDotCenter")
-        relayout(animated: false)
+        relayout()
     }
 
     func collapse() {
-        collapseWorkItem?.cancel()
+        presentationWorkItem?.cancel()
+        dismissalWorkItem?.cancel()
         displayMode = .collapsed
-        model.isCardPresented = false
-        relayout()
+        withAnimation(.easeIn(duration: cardDismissalDuration)) {
+            model.isCardPresented = false
+        }
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.displayMode == .collapsed else { return }
+            self.model.isCardHostExpanded = false
+            self.relayout()
+        }
+        dismissalWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + cardDismissalDuration, execute: workItem)
         panel.resignKey()
         if model.phase == .wrapUp {
             model.closeWrapUp()
@@ -115,10 +120,14 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     private func respond(to phase: TaskPhase) {
         switch phase {
-        case .waiting, .wrapUp:
+        case .waiting:
             displayMode = .automatic
-            model.isCardPresented = true
-            relayout()
+            presentCard()
+        case .wrapUp:
+            if displayMode == .collapsed {
+                displayMode = .automatic
+            }
+            presentCard()
         case .overtime:
             collapse()
         case .countdown:
@@ -128,60 +137,80 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func relayout(animated: Bool = true) {
+    private func presentCard(focusAfterPresentation: Bool = false) {
+        dismissalWorkItem?.cancel()
+        presentationWorkItem?.cancel()
+
+        guard !model.isCardPresented else {
+            if focusAfterPresentation { model.focusRequest += 1 }
+            return
+        }
+
+        model.isCardHostExpanded = true
+        relayout()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.displayMode.isExpanded else { return }
+            withAnimation(.easeOut(duration: cardPresentationDuration)) {
+                self.model.isCardPresented = true
+            }
+            if focusAfterPresentation { self.model.focusRequest += 1 }
+        }
+        presentationWorkItem = workItem
+        DispatchQueue.main.async(execute: workItem)
+    }
+
+    private func relayout() {
         let expanded = displayMode.isExpanded
         let targetSize = expanded
-            ? NSSize(width: cardWidth + dotSize + gap, height: cardHeight)
-            : NSSize(width: dotSize, height: dotSize)
+            ? NSSize(
+                width: FloatingMetrics.cardWidth + FloatingMetrics.anchorWidth + FloatingMetrics.gap,
+                height: FloatingMetrics.cardHeight
+            )
+            : NSSize(width: FloatingMetrics.anchorWidth, height: FloatingMetrics.anchorHeight)
         let frame = panelFrame(for: targetSize, expanded: expanded)
-        let update = {
-            self.panel.setContentSize(targetSize)
-            self.panel.setFrameOrigin(frame.origin)
-        }
-        if animated {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = expanded ? 0.34 : 0.24
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                self.panel.animator().setFrame(frame, display: true)
-            }
-        } else {
-            update()
-        }
+        panel.setContentSize(targetSize)
+        panel.setFrameOrigin(frame.origin)
     }
 
     private func panelFrame(for size: NSSize, expanded: Bool) -> NSRect {
         guard expanded else {
-            return NSRect(x: dotCenter.x - dotSize / 2, y: dotCenter.y - dotSize / 2, width: size.width, height: size.height)
+            return NSRect(
+                x: dotCenter.x - FloatingMetrics.anchorWidth / 2,
+                y: dotCenter.y - FloatingMetrics.anchorHeight / 2,
+                width: size.width,
+                height: size.height
+            )
         }
         let screen = screenForDot()
         let visible = screen.visibleFrame.insetBy(dx: 8, dy: 8)
-        let needsLeft = dotCenter.x + size.width - dotSize / 2 > visible.maxX
+        let needsLeft = dotCenter.x + size.width - FloatingMetrics.anchorWidth / 2 > visible.maxX
         let x = needsLeft
-            ? dotCenter.x - dotSize / 2 - gap - cardWidth
-            : dotCenter.x - dotSize / 2
+            ? dotCenter.x - FloatingMetrics.anchorWidth / 2 - FloatingMetrics.gap - FloatingMetrics.cardWidth
+            : dotCenter.x - FloatingMetrics.anchorWidth / 2
         let y: CGFloat
         switch verticalAnchor(on: screen) {
         case .center:
             y = dotCenter.y - size.height / 2
         case .above:
-            y = dotCenter.y - dotSize / 2
+            y = dotCenter.y - FloatingMetrics.anchorHeight / 2
         case .below:
-            y = dotCenter.y - size.height + dotSize / 2
+            y = dotCenter.y - size.height + FloatingMetrics.anchorHeight / 2
         }
         return NSRect(x: x, y: y, width: size.width, height: size.height)
     }
 
     func isCardOnLeft() -> Bool {
         let visible = screenForDot().visibleFrame.insetBy(dx: 8, dy: 8)
-        return dotCenter.x + cardWidth + gap + dotSize / 2 > visible.maxX
+        return dotCenter.x + FloatingMetrics.cardWidth + FloatingMetrics.gap + FloatingMetrics.anchorWidth / 2 > visible.maxX
     }
 
     func dotVerticalOffset(expanded: Bool) -> CGFloat {
         guard expanded else { return 0 }
         return switch verticalAnchor(on: screenForDot()) {
-        case .center: cardHeight / 2 - dotSize / 2
-        case .above: 0
-        case .below: cardHeight - dotSize
+        case .center: 0
+        case .above: FloatingMetrics.cardHeight / 2 - FloatingMetrics.anchorHeight / 2
+        case .below: -(FloatingMetrics.cardHeight / 2 - FloatingMetrics.anchorHeight / 2)
         }
     }
 
@@ -191,12 +220,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     private func verticalAnchor(on screen: NSScreen) -> VerticalAnchor {
         let visible = screen.visibleFrame.insetBy(dx: 8, dy: 8)
-        let halfHeight = cardHeight / 2
+        let halfHeight = FloatingMetrics.cardHeight / 2
         if dotCenter.y - halfHeight >= visible.minY, dotCenter.y + halfHeight <= visible.maxY {
             return .center
         }
-        if dotCenter.y - dotSize / 2 >= visible.minY,
-           dotCenter.y - dotSize / 2 + cardHeight <= visible.maxY {
+        if dotCenter.y - FloatingMetrics.anchorHeight / 2 >= visible.minY,
+           dotCenter.y - FloatingMetrics.anchorHeight / 2 + FloatingMetrics.cardHeight <= visible.maxY {
             return .above
         }
         return .below
@@ -218,9 +247,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             collapse()
             return
         }
-        if model.phase == .idle {
-            activateForTextEntry()
-        }
+        displayMode = .fixed
+        activateForTextEntry()
     }
 
     private func activateForTextEntry() {
@@ -235,7 +263,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     private static func defaultDotCenter() -> CGPoint {
         let frame = NSScreen.main?.visibleFrame ?? .zero
-        return CGPoint(x: frame.maxX - 42, y: frame.maxY - 42)
+        return CGPoint(x: frame.maxX - 86, y: frame.maxY - 42)
     }
 }
 

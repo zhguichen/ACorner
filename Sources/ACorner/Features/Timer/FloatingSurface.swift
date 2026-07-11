@@ -4,63 +4,92 @@ import SwiftUI
 struct FloatingSurface: View {
     let model: TaskSessionModel
     let controller: FloatingPanelController
+    let store: RecordStore
+    let openSettings: () -> Void
     @State private var lastDragTranslation: CGSize = .zero
     @State private var isDragging = false
 
     var body: some View {
-        let expanded = model.isCardPresented
+        let cardIsVisible = model.isCardPresented
+        let hostIsExpanded = model.isCardHostExpanded
+        let cardIsOnLeft = controller.isCardOnLeft()
+        let cardLeading: CGFloat = cardIsOnLeft ? 0 : FloatingMetrics.anchorWidth + FloatingMetrics.gap
         ZStack(alignment: .leading) {
-            if expanded {
+            if cardIsVisible {
                 card
-                    .frame(width: 312, height: 300)
-                    .offset(x: controller.isCardOnLeft() ? 0 : 32)
-                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: controller.isCardOnLeft() ? .trailing : .leading)))
+                    .frame(width: FloatingMetrics.cardWidth, height: FloatingMetrics.cardHeight)
+                    .offset(x: cardLeading)
+                    .transition(drawerTransition(cardIsOnLeft: cardIsOnLeft))
+                    .zIndex(0)
             }
 
-            dot
-                .offset(x: controller.isCardOnLeft() && expanded ? 322 : 0)
-                .offset(y: controller.dotVerticalOffset(expanded: expanded))
+            anchorStrip
+                .offset(x: cardIsOnLeft && hostIsExpanded ? FloatingMetrics.cardWidth + FloatingMetrics.gap : 0)
+                .offset(y: controller.dotVerticalOffset(expanded: hostIsExpanded))
+                .zIndex(1)
         }
-        .frame(width: expanded ? 344 : 22, height: expanded ? 300 : 22, alignment: .leading)
+        .frame(
+            width: hostIsExpanded ? FloatingMetrics.cardWidth + FloatingMetrics.anchorWidth + FloatingMetrics.gap : FloatingMetrics.anchorWidth,
+            height: hostIsExpanded ? FloatingMetrics.cardHeight : FloatingMetrics.anchorHeight,
+            alignment: .leading
+        )
         .onHover { isInside in
             isInside ? controller.hoverStarted() : controller.hoverEnded()
         }
-        .animation(.easeInOut(duration: 0.25), value: model.phase)
     }
 
-    private var dot: some View {
-        Circle()
-            .fill(dotColor)
-            .overlay {
-                Circle().strokeBorder(.white.opacity(0.34), lineWidth: 1)
+    private func drawerTransition(cardIsOnLeft: Bool) -> AnyTransition {
+        let travel = FloatingMetrics.drawerTravel * (cardIsOnLeft ? 1 : -1)
+        return .asymmetric(
+            insertion: .opacity.combined(with: .offset(x: travel, y: 0)),
+            removal: .opacity.combined(with: .offset(x: travel, y: 0))
+        )
+    }
+
+    private var anchorStrip: some View {
+        ZStack {
+            Capsule()
+                .fill(anchorTint.gradient.opacity(0.92))
+            Capsule()
+                .strokeBorder(.white.opacity(0.34), lineWidth: 1)
+
+            HStack(spacing: 7) {
+                Text(anchorTitle)
+                    .font(.caption2.weight(.semibold))
+                    .lineLimit(1)
+                    .foregroundStyle(.white.opacity(0.94))
+                ProgressLine(progress: store.todoProgress)
             }
-            .shadow(color: dotColor.opacity(0.28), radius: 7, y: 2)
-            .frame(width: 22, height: 22)
-            .contentShape(Circle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        let distance = hypot(value.translation.width, value.translation.height)
-                        guard distance >= 3 else { return }
-                        isDragging = true
-                        let delta = CGSize(
-                            width: value.translation.width - lastDragTranslation.width,
-                            height: -value.translation.height + lastDragTranslation.height
-                        )
-                        lastDragTranslation = value.translation
-                        controller.movedDot(by: delta)
+            .padding(.horizontal, 8)
+        }
+        .shadow(color: anchorTint.opacity(0.24), radius: 10, y: 2)
+        .animation(.easeInOut(duration: 0.2), value: model.phase)
+        .frame(width: FloatingMetrics.anchorWidth, height: FloatingMetrics.anchorHeight)
+        .contentShape(Capsule())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    let distance = hypot(value.translation.width, value.translation.height)
+                    guard distance >= 3 else { return }
+                    isDragging = true
+                    let delta = CGSize(
+                        width: value.translation.width - lastDragTranslation.width,
+                        height: -value.translation.height + lastDragTranslation.height
+                    )
+                    lastDragTranslation = value.translation
+                    controller.movedDot(by: delta)
+                }
+                .onEnded { _ in
+                    if !isDragging {
+                        controller.dotActivated()
                     }
-                    .onEnded { _ in
-                        if !isDragging {
-                            controller.dotActivated()
-                        }
-                        lastDragTranslation = .zero
-                        isDragging = false
-                    }
-            )
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("一隅，\(model.statusText)")
-            .accessibilityHint("点按以展开任务卡片，拖动以移动位置")
+                    lastDragTranslation = .zero
+                    isDragging = false
+                }
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(anchorAccessibilityLabel)
+        .accessibilityHint("点按以展开任务面板，拖动以移动位置")
     }
 
     @ViewBuilder
@@ -68,7 +97,7 @@ struct FloatingSurface: View {
         Group {
             switch model.phase {
             case .idle:
-                TaskInputCard(model: model)
+                TaskInputCard(model: model, store: store, openSettings: openSettings)
             case .countdown, .overtime:
                 ActiveTaskCard(model: model)
             case .waiting:
@@ -88,7 +117,16 @@ struct FloatingSurface: View {
         .accessibilityElement(children: .contain)
     }
 
-    private var dotColor: Color {
+    private var anchorTitle: String {
+        switch model.phase {
+        case .idle, .wrapUp: "空闲"
+        case .countdown: "进行中"
+        case .waiting: "到时"
+        case .overtime: "继续中"
+        }
+    }
+
+    private var anchorTint: Color {
         switch model.phase {
         case .idle, .wrapUp: Color(nsColor: .systemGray)
         case .countdown: Color(nsColor: .systemGreen)
@@ -96,10 +134,19 @@ struct FloatingSurface: View {
         case .overtime: Color(nsColor: .systemBlue)
         }
     }
+
+    private var anchorAccessibilityLabel: String {
+        if store.todoCount == 0 {
+            return "一隅，\(model.statusText)，暂无待办"
+        }
+        return "一隅，\(model.statusText)，待办完成 \(store.completedTodoCount) / \(store.todoCount)"
+    }
 }
 
 private struct TaskInputCard: View {
     let model: TaskSessionModel
+    let store: RecordStore
+    let openSettings: () -> Void
     @FocusState private var titleIsFocused: Bool
 
     var body: some View {
@@ -111,26 +158,53 @@ private struct TaskInputCard: View {
                 .focused($titleIsFocused)
                 .onChange(of: model.draftTitle) { model.saveDraft() }
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("投入多久？")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(model.draftMinutes) 分钟")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
+            TimeInput(minutes: Binding(
+                get: { model.draftMinutes },
+                set: { model.updateDraftMinutes($0) }
+            ))
+            .onChange(of: model.draftMinutes) { model.saveDraft() }
+
+            if store.todoCount > 0 {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text("待办进度")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(store.completedTodoCount)/\(store.todoCount) 已完成")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if !store.pendingTodos.isEmpty {
+                        Menu("从待办填入") {
+                            ForEach(store.pendingTodos) { todo in
+                                Button(todo.title) {
+                                    model.useTodo(todo)
+                                }
+                            }
+                        }
+                    }
                 }
-                MinuteWheel(minutes: $model.draftMinutes)
-                .frame(height: 82)
-                .onChange(of: model.draftMinutes) { model.saveDraft() }
             }
 
-            Button("开始") { model.start() }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .disabled(model.draftTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.draftMinutes <= 0)
+            HStack {
+                Button {
+                    openSettings()
+                } label: {
+                    Label("待办", systemImage: "checklist")
+                }
+                .buttonStyle(.bordered)
+
+                Spacer(minLength: 0)
+
+                Button("开始") { model.start() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                    .disabled(
+                        model.draftTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        !TaskSessionModel.plannedMinutesRange.contains(model.draftMinutes)
+                    )
+            }
         }
         .task(id: model.focusRequest) {
             titleIsFocused = true
@@ -138,18 +212,42 @@ private struct TaskInputCard: View {
     }
 }
 
+private struct ProgressLine: View {
+    let progress: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            let clampedProgress = min(max(progress, 0), 1)
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(.white.opacity(0.18))
+                Capsule()
+                    .fill(.white.opacity(0.92))
+                    .frame(width: proxy.size.width * clampedProgress)
+            }
+        }
+        .frame(height: 4)
+    }
+}
+
 private struct ActiveTaskCard: View {
     let model: TaskSessionModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             CardHeading(
                 eyebrow: model.phase == .countdown ? "正在进行" : "仍在投入",
                 title: model.activeTask?.title ?? "",
                 status: model.fuzzyTimeText()
             )
-            Divider()
-            ActionRow(model: model)
+            RecordNoteBox(model: model)
+                .frame(minHeight: 126)
+            HStack {
+                Spacer(minLength: 0)
+                Button("结束") { model.endCurrentTask() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+            }
         }
     }
 }
@@ -158,38 +256,45 @@ private struct WaitingCard: View {
     let model: TaskSessionModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             CardHeading(eyebrow: "时间到了", title: "这段时间结束了", status: model.activeTask?.title ?? "")
             Text("可以在这里收尾，或者自然地开始下一件事。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            ActionRow(model: model)
+            RecordNoteBox(model: model)
+                .frame(minHeight: 92)
+            HStack {
+                Spacer(minLength: 0)
+                Button("结束") { model.endCurrentTask() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+            }
         }
     }
 }
 
 private struct WrapUpCard: View {
     let model: TaskSessionModel
-    @State private var note = ""
-    @FocusState private var noteIsFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            CardHeading(eyebrow: "已完成", title: model.completedRecord?.title ?? "", status: "已自动保存")
+            CardHeading(eyebrow: "已结束", title: model.completedRecord?.title ?? "", status: "待保存")
             HStack(spacing: 16) {
                 TimeSummary(label: "计划", value: "\(model.completedRecord?.plannedMinutes ?? 0) 分钟")
                 TimeSummary(label: "实际", value: model.completedRecord.map { durationText($0.actualDuration) } ?? "")
             }
-            TextField("写点什么……", text: $note, axis: .vertical)
-                .lineLimit(2...4)
-                .textFieldStyle(.roundedBorder)
-                .focused($noteIsFocused)
-                .onChange(of: note) { model.updateNote(note) }
-            Text("已自动保存")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            RecordNoteBox(model: model)
+                .frame(minHeight: 116)
+            HStack {
+                Text("点击 Next Mission 后保存")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 0)
+                Button("Next Mission") { model.saveAndStartNextMission() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+            }
         }
-        .onAppear { note = model.completedRecord?.note ?? "" }
     }
 }
 
@@ -217,17 +322,30 @@ private struct CardHeading: View {
     }
 }
 
-private struct ActionRow: View {
+private struct RecordNoteBox: View {
     let model: TaskSessionModel
+    @FocusState private var noteIsFocused: Bool
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button("完成") { model.finish(.completed) }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-            Button("下一个任务") { model.finish(.nextTask) }
-                .buttonStyle(.bordered)
-            Spacer(minLength: 0)
+        TextEditor(text: Binding(
+            get: { model.activeNote },
+            set: { model.updateNote($0) }
+        ))
+        .focused($noteIsFocused)
+        .font(.callout)
+        .scrollContentBackground(.hidden)
+        .padding(8)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+        }
+        .accessibilityLabel("任务记录")
+        .onTapGesture {
+            NSApp.activate(ignoringOtherApps: true)
+            DispatchQueue.main.async {
+                noteIsFocused = true
+            }
         }
     }
 }
@@ -249,125 +367,24 @@ private func durationText(_ duration: TimeInterval) -> String {
     return "约 \(roundedMinutes) 分钟"
 }
 
-private struct MinuteWheel: NSViewRepresentable {
+private struct TimeInput: View {
     @Binding var minutes: Int
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(minutes: $minutes)
-    }
-
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
-        let documentView = MinuteWheelDocumentView()
-        documentView.frame = NSRect(x: 0, y: 0, width: 260, height: MinuteWheelDocumentView.contentHeight)
-
-        scrollView.documentView = documentView
-        scrollView.drawsBackground = false
-        scrollView.borderType = .noBorder
-        scrollView.hasVerticalScroller = false
-        scrollView.hasHorizontalScroller = false
-        scrollView.autohidesScrollers = true
-        scrollView.verticalScrollElasticity = .none
-        scrollView.contentView.postsBoundsChangedNotifications = true
-
-        context.coordinator.scrollView = scrollView
-        context.coordinator.documentView = documentView
-        context.coordinator.installScrollObserver()
-        DispatchQueue.main.async {
-            context.coordinator.scroll(to: minutes)
-        }
-        return scrollView
-    }
-
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        scrollView.documentView?.frame.size.width = scrollView.contentSize.width
-        context.coordinator.scroll(to: minutes)
-    }
-
-    static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {
-        coordinator.removeScrollObserver()
-    }
-
-    @MainActor
-    final class Coordinator {
-        private var minutes: Binding<Int>
-        weak var scrollView: NSScrollView?
-        weak var documentView: MinuteWheelDocumentView?
-        private var observation: NSObjectProtocol?
-        private var displayedMinutes = 0
-
-        init(minutes: Binding<Int>) {
-            self.minutes = minutes
-        }
-
-        func installScrollObserver() {
-            guard let clipView = scrollView?.contentView else { return }
-            observation = NotificationCenter.default.addObserver(
-                forName: NSView.boundsDidChangeNotification,
-                object: clipView,
-                queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    self?.updateSelectionFromScrollPosition()
-                }
-            }
-        }
-
-        func removeScrollObserver() {
-            if let observation {
-                NotificationCenter.default.removeObserver(observation)
-            }
-        }
-
-        func scroll(to value: Int) {
-            guard displayedMinutes != value, let scrollView else { return }
-            displayedMinutes = value
-            documentView?.selectedMinutes = value
-            let rowCenter = CGFloat(value - 1) * MinuteWheelDocumentView.rowHeight + MinuteWheelDocumentView.rowHeight / 2
-            let proposedY = rowCenter - scrollView.contentSize.height / 2
-            let maxY = max(0, MinuteWheelDocumentView.contentHeight - scrollView.contentSize.height)
-            scrollView.contentView.scroll(to: NSPoint(x: 0, y: min(max(0, proposedY), maxY)))
-            scrollView.reflectScrolledClipView(scrollView.contentView)
-        }
-
-        private func updateSelectionFromScrollPosition() {
-            guard let scrollView else { return }
-            let centerY = scrollView.contentView.bounds.midY
-            let row = Int((centerY / MinuteWheelDocumentView.rowHeight).rounded(.down))
-            let value = min(max(row + 1, 1), 180)
-            guard value != displayedMinutes else { return }
-            displayedMinutes = value
-            documentView?.selectedMinutes = value
-            minutes.wrappedValue = value
-        }
-    }
-}
-
-private final class MinuteWheelDocumentView: NSView {
-    static let rowHeight: CGFloat = 28
-    static let contentHeight = rowHeight * 180
-
-    var selectedMinutes = 25 {
-        didSet { needsDisplay = true }
-    }
-
-    override var isFlipped: Bool { true }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let firstRow = max(0, Int((dirtyRect.minY / Self.rowHeight).rounded(.down)))
-        let lastRow = min(179, Int((dirtyRect.maxY / Self.rowHeight).rounded(.up)))
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-
-        for row in firstRow...lastRow {
-            let minute = row + 1
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: minute == selectedMinutes ? 13 : 12, weight: minute == selectedMinutes ? .semibold : .regular),
-                .foregroundColor: minute == selectedMinutes ? NSColor.labelColor : NSColor.secondaryLabelColor,
-                .paragraphStyle: paragraph
-            ]
-            let rect = NSRect(x: 0, y: CGFloat(row) * Self.rowHeight + 4, width: bounds.width, height: Self.rowHeight - 8)
-            "\(minute) 分钟".draw(in: rect, withAttributes: attributes)
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("投入多久？")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            Spacer()
+            TextField("25", value: $minutes, format: .number)
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 58)
+                .accessibilityLabel("投入分钟数")
+                .accessibilityValue("\(minutes) 分钟")
+            Text("分钟")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }

@@ -16,20 +16,168 @@ struct ACornerApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let store = RecordStore()
     private var floatingPanel: FloatingPanelController?
+    private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         let model = TaskSessionModel(store: store)
-        floatingPanel = FloatingPanelController(model: model)
+        floatingPanel = FloatingPanelController(
+            model: model,
+            store: store,
+            openSettings: { [weak self] in
+                self?.openSettingsWindow()
+            }
+        )
         floatingPanel?.show()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
+
+    private func openSettingsWindow() {
+        if settingsWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 500),
+                styleMask: [.titled, .closable, .miniaturizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "一隅"
+            window.contentView = NSHostingView(rootView: SettingsView(store: store))
+            window.isReleasedWhenClosed = false
+            window.center()
+            settingsWindow = window
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
 }
 
 private struct SettingsView: View {
+    let store: RecordStore
+
+    var body: some View {
+        TabView {
+            TodoSettingsView(store: store)
+                .tabItem {
+                    Label("待办", systemImage: "checklist")
+                }
+
+            StorageSettingsView(store: store)
+                .tabItem {
+                    Label("记录", systemImage: "folder")
+                }
+        }
+        .frame(width: 560, height: 500)
+    }
+}
+
+private struct TodoSettingsView: View {
+    let store: RecordStore
+    @State private var draftTodoTitle = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if store.folderDisplayName == nil {
+                ContentUnavailableView {
+                    Label("先选择保存位置", systemImage: "folder")
+                } description: {
+                    Text("待办和已完成状态会跟任务记录一起写入同一个本地文件夹。")
+                } actions: {
+                    Button("选择文件夹…") {
+                        _ = store.selectFolder()
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("待办事项")
+                        .font(.title3.weight(.semibold))
+                    Text("完成后打勾，长条入口里的进度线会按完成数量逐步填满。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 10) {
+                    TextField("新增一个待办事项", text: $draftTodoTitle)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(addTodo)
+                    Button("添加", action: addTodo)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(draftTodoTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                HStack {
+                    Text("\(store.completedTodoCount)/\(store.todoCount) 已完成")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(store.folderDisplayName ?? "")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+
+                List {
+                    Section("待办") {
+                        if store.pendingTodos.isEmpty {
+                            Text("还没有待办事项")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(store.pendingTodos) { todo in
+                                TodoRow(
+                                    todo: todo,
+                                    isCompleted: false,
+                                    onToggle: { store.setTodoCompleted(id: todo.id, isCompleted: true) },
+                                    onRemove: { store.removeTodo(id: todo.id) }
+                                )
+                            }
+                        }
+                    }
+
+                    Section("已完成") {
+                        if store.completedTodos.isEmpty {
+                            Text("还没有已完成事项")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(store.completedTodos) { todo in
+                                TodoRow(
+                                    todo: todo,
+                                    isCompleted: true,
+                                    onToggle: { store.setTodoCompleted(id: todo.id, isCompleted: false) },
+                                    onRemove: { store.removeTodo(id: todo.id) }
+                                )
+                            }
+                        }
+                    }
+
+                    Section("完成记录") {
+                        if store.completedRecords.isEmpty {
+                            Text("还没有完成记录")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(store.completedRecords) { record in
+                                TaskRecordRow(record: record)
+                            }
+                        }
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+        .padding(20)
+    }
+
+    private func addTodo() {
+        let trimmedTitle = draftTodoTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return }
+        store.addTodo(title: trimmedTitle)
+        draftTodoTitle = ""
+    }
+}
+
+private struct StorageSettingsView: View {
     let store: RecordStore
 
     var body: some View {
@@ -43,13 +191,79 @@ private struct SettingsView: View {
                     _ = store.selectFolder()
                 }
             }
-            Section {
-                Text("一隅会将完成的任务写入你选择的文件夹中。")
+
+            Section("说明") {
+                Text("一隅会将完成的任务记录和待办清单一起写入你选择的本地文件夹。")
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420)
-        .padding()
+        .padding(20)
     }
+}
+
+private struct TodoRow: View {
+    let todo: TodoItem
+    let isCompleted: Bool
+    let onToggle: () -> Void
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onToggle) {
+                Image(systemName: isCompleted ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isCompleted ? .green : .secondary)
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(todo.title)
+                    .strikethrough(isCompleted)
+                    .foregroundStyle(isCompleted ? .secondary : .primary)
+                Text(todo.completedAt ?? todo.createdAt, format: .dateTime.month().day().hour().minute())
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Spacer()
+
+            Button(action: onRemove) {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.tertiary)
+        }
+    }
+}
+
+private struct TaskRecordRow: View {
+    let record: TaskRecord
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(record.title)
+                    .font(.callout.weight(.medium))
+                Spacer()
+                Text(durationText(record.actualDuration))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(record.completedAt, format: .dateTime.month().day().hour().minute())
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            if !record.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(record.note)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private func durationText(_ duration: TimeInterval) -> String {
+    let roundedMinutes = max(1, Int((duration / 60).rounded()))
+    return "约 \(roundedMinutes) 分钟"
 }

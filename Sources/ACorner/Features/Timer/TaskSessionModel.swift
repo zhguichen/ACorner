@@ -3,6 +3,8 @@ import Observation
 
 private struct SavedSession: Codable {
     var activeTask: ActiveTask?
+    var completedRecord: TaskRecord?
+    var activeNote: String?
     var draftTitle: String
     var draftMinutes: Int
 }
@@ -10,6 +12,8 @@ private struct SavedSession: Codable {
 @MainActor
 @Observable
 final class TaskSessionModel {
+    static let plannedMinutesRange = 1...180
+
     private enum Keys {
         static let session = "savedSession"
     }
@@ -17,15 +21,16 @@ final class TaskSessionModel {
     private let store: RecordStore
     private var phaseTimer: Timer?
     private var refreshTimer: Timer?
-    private var wrapUpDismissWorkItem: DispatchWorkItem?
 
     var phase: TaskPhase = .idle
     var activeTask: ActiveTask?
     var draftTitle: String
     var draftMinutes: Int
+    var activeNote: String
     var completedRecord: TaskRecord?
     var focusRequest = 0
     var isCardPresented = false
+    var isCardHostExpanded = false
 
     var onPhaseChanged: ((TaskPhase) -> Void)?
     var onRequestCollapse: (() -> Void)?
@@ -34,9 +39,15 @@ final class TaskSessionModel {
         self.store = store
         let session = Self.loadSession()
         self.activeTask = session.activeTask
+        self.completedRecord = session.completedRecord
+        self.activeNote = session.activeNote ?? session.completedRecord?.note ?? ""
         self.draftTitle = session.draftTitle
-        self.draftMinutes = session.draftMinutes
-        refreshPhase()
+        self.draftMinutes = Self.normalizedPlannedMinutes(session.draftMinutes)
+        if completedRecord != nil, activeTask == nil {
+            phase = .wrapUp
+        } else {
+            refreshPhase()
+        }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.refreshPhase()
@@ -56,25 +67,28 @@ final class TaskSessionModel {
 
     func start() {
         let trimmedTitle = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedTitle.isEmpty, draftMinutes > 0 else { return }
+        guard !trimmedTitle.isEmpty, Self.plannedMinutesRange.contains(draftMinutes) else { return }
 
         let now = Date()
+        let linkedTodoID = store.pendingTodo(matchingTitle: trimmedTitle)?.id
         activeTask = ActiveTask(
             id: UUID(),
             title: trimmedTitle,
             plannedMinutes: draftMinutes,
             startedAt: now,
-            plannedEndsAt: now.addingTimeInterval(TimeInterval(draftMinutes * 60))
+            plannedEndsAt: now.addingTimeInterval(TimeInterval(draftMinutes * 60)),
+            linkedTodoID: linkedTodoID
         )
+        completedRecord = nil
+        activeNote = ""
         draftTitle = ""
         persistSession()
         refreshPhase()
         onRequestCollapse?()
     }
 
-    func finish(_ kind: FinishKind) {
+    func endCurrentTask() {
         guard let activeTask else { return }
-        guard store.ensureFolder() else { return }
 
         let completedAt = Date()
         let actualDuration = max(0, completedAt.timeIntervalSince(activeTask.startedAt))
@@ -89,9 +103,22 @@ final class TaskSessionModel {
             actualDuration: actualDuration,
             continuedAfterPlan: additionalDuration > 0,
             additionalDuration: additionalDuration,
-            note: "",
-            finishKind: kind
+            note: activeNote,
+            finishKind: .completed,
+            linkedTodoID: activeTask.linkedTodoID
         )
+
+        self.activeTask = nil
+        completedRecord = record
+        phaseTimer?.invalidate()
+        persistSession()
+        setPhase(.wrapUp)
+    }
+
+    func saveAndStartNextMission() {
+        guard var record = completedRecord else { return }
+        guard store.ensureFolder() else { return }
+        record.note = activeNote
 
         do {
             try store.save(record)
@@ -100,39 +127,29 @@ final class TaskSessionModel {
             return
         }
 
-        self.activeTask = nil
-        phaseTimer?.invalidate()
-        persistSession()
-
-        switch kind {
-        case .completed:
-            completedRecord = record
-            setPhase(.wrapUp)
-            scheduleEmptyWrapUpDismissal()
-        case .nextTask:
-            completedRecord = nil
-            draftTitle = ""
-            focusRequest += 1
-            setPhase(.idle)
+        if let linkedTodoID = record.linkedTodoID {
+            store.setTodoCompleted(id: linkedTodoID, isCompleted: true)
         }
+
+        completedRecord = nil
+        activeNote = ""
+        draftTitle = ""
+        focusRequest += 1
+        persistSession()
+        setPhase(.idle)
     }
 
     func updateNote(_ note: String) {
-        guard var record = completedRecord else { return }
-        wrapUpDismissWorkItem?.cancel()
-        record.note = note
-        completedRecord = record
-        do {
-            try store.save(record)
-        } catch {
-            store.presentWriteError(error)
+        activeNote = note
+        if var record = completedRecord {
+            record.note = note
+            completedRecord = record
         }
+        persistSession()
     }
 
     func closeWrapUp() {
-        wrapUpDismissWorkItem?.cancel()
-        completedRecord = nil
-        setPhase(.idle)
+        persistSession()
     }
 
     func fuzzyTimeText(now: Date = Date()) -> String {
@@ -156,6 +173,20 @@ final class TaskSessionModel {
     func saveDraft() {
         guard phase == .idle else { return }
         persistSession()
+    }
+
+    func updateDraftMinutes(_ minutes: Int) {
+        draftMinutes = Self.normalizedPlannedMinutes(minutes)
+    }
+
+    func useTodo(_ todo: TodoItem) {
+        draftTitle = todo.title
+        saveDraft()
+        focusRequest += 1
+    }
+
+    static func normalizedPlannedMinutes(_ minutes: Int) -> Int {
+        min(max(minutes, plannedMinutesRange.lowerBound), plannedMinutesRange.upperBound)
     }
 
     private func refreshPhase() {
@@ -194,18 +225,14 @@ final class TaskSessionModel {
         }
     }
 
-    private func scheduleEmptyWrapUpDismissal() {
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.completedRecord = nil
-            self?.setPhase(.idle)
-            self?.onRequestCollapse?()
-        }
-        wrapUpDismissWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: workItem)
-    }
-
     private func persistSession() {
-        let session = SavedSession(activeTask: activeTask, draftTitle: draftTitle, draftMinutes: draftMinutes)
+        let session = SavedSession(
+            activeTask: activeTask,
+            completedRecord: completedRecord,
+            activeNote: activeNote,
+            draftTitle: draftTitle,
+            draftMinutes: draftMinutes
+        )
         guard let data = try? JSONEncoder().encode(session) else { return }
         UserDefaults.standard.set(data, forKey: Keys.session)
     }
@@ -213,7 +240,7 @@ final class TaskSessionModel {
     private static func loadSession() -> SavedSession {
         guard let data = UserDefaults.standard.data(forKey: Keys.session),
               let session = try? JSONDecoder().decode(SavedSession.self, from: data) else {
-            return SavedSession(activeTask: nil, draftTitle: "", draftMinutes: 25)
+            return SavedSession(activeTask: nil, completedRecord: nil, activeNote: nil, draftTitle: "", draftMinutes: 25)
         }
         return session
     }
