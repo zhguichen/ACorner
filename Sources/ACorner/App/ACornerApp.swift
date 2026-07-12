@@ -7,7 +7,12 @@ struct ACornerApp: App {
 
     var body: some Scene {
         Settings {
-            SettingsView(store: appDelegate.store)
+            SettingsView(
+                store: appDelegate.store,
+                openMainPanel: {
+                    appDelegate.showMainPanel()
+                }
+            )
         }
     }
 }
@@ -44,7 +49,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 defer: false
             )
             window.title = "一隅"
-            window.contentView = NSHostingView(rootView: SettingsView(store: store))
+            window.contentView = NSHostingView(
+                rootView: SettingsView(
+                    store: store,
+                    openMainPanel: { [weak self] in
+                        self?.showMainPanel()
+                    }
+                )
+            )
             window.isReleasedWhenClosed = false
             window.center()
             settingsWindow = window
@@ -53,22 +65,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
+
+    func showMainPanel() {
+        floatingPanel?.show()
+        NSApp.activate(ignoringOtherApps: true)
+    }
 }
 
 private struct SettingsView: View {
     let store: RecordStore
+    let openMainPanel: () -> Void
 
     var body: some View {
-        TabView {
-            TodoSettingsView(store: store)
-                .tabItem {
-                    Label("待办", systemImage: "checklist")
+        VStack(spacing: 0) {
+            HStack {
+                Spacer(minLength: 0)
+                Button {
+                    openMainPanel()
+                } label: {
+                    Label("主面板", systemImage: "rectangle.inset.filled")
                 }
+                .buttonStyle(.borderless)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+            }
 
-            StorageSettingsView(store: store)
-                .tabItem {
-                    Label("记录", systemImage: "folder")
+            if store.isTodayConfirmed {
+                TabView {
+                    TodoSettingsView(store: store)
+                        .tabItem {
+                            Label("待办", systemImage: "checklist")
+                        }
+
+                    StorageSettingsView(store: store)
+                        .tabItem {
+                            Label("记录", systemImage: "folder")
+                        }
                 }
+            } else {
+                DailyCheckInView(store: store)
+            }
         }
         .frame(width: 560, height: 500)
     }
@@ -77,6 +113,7 @@ private struct SettingsView: View {
 private struct TodoSettingsView: View {
     let store: RecordStore
     @State private var draftTodoTitle = ""
+    @State private var recordPendingDeletion: TaskRecord?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -153,12 +190,22 @@ private struct TodoSettingsView: View {
                     }
 
                     Section("完成记录") {
-                        if store.completedRecords.isEmpty {
+                        if store.recordDays.isEmpty {
                             Text("还没有完成记录")
                                 .foregroundStyle(.secondary)
                         } else {
-                            ForEach(store.completedRecords) { record in
-                                TaskRecordRow(record: record)
+                            ForEach(store.recordDays) { day in
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(day.title)
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                    ForEach(day.records) { record in
+                                        TaskRecordRow(record: record) {
+                                            recordPendingDeletion = record
+                                        }
+                                    }
+                                }
+                                .padding(.vertical, 4)
                             }
                         }
                     }
@@ -167,6 +214,29 @@ private struct TodoSettingsView: View {
             }
         }
         .padding(20)
+        .confirmationDialog(
+            "删除这条完成记录？",
+            isPresented: Binding(
+                get: { recordPendingDeletion != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        recordPendingDeletion = nil
+                    }
+                }
+            )
+        ) {
+            Button("删除", role: .destructive) {
+                if let recordPendingDeletion {
+                    store.removeRecord(recordPendingDeletion)
+                }
+                recordPendingDeletion = nil
+            }
+            Button("取消", role: .cancel) {
+                recordPendingDeletion = nil
+            }
+        } message: {
+            Text("这会从本地完成记录中永久删除该项。")
+        }
     }
 
     private func addTodo() {
@@ -238,6 +308,7 @@ private struct TodoRow: View {
 
 private struct TaskRecordRow: View {
     let record: TaskRecord
+    let onRemove: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -248,6 +319,12 @@ private struct TaskRecordRow: View {
                 Text(durationText(record.actualDuration))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Button(action: onRemove) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.tertiary)
+                .accessibilityLabel("删除完成记录：\(record.title)")
             }
             Text(record.completedAt, format: .dateTime.month().day().hour().minute())
                 .font(.caption2)

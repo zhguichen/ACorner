@@ -37,6 +37,12 @@ struct TaskRecord: Codable, Identifiable, Equatable {
     var linkedTodoID: UUID? = nil
 }
 
+struct TaskRecordDay: Identifiable, Equatable {
+    var id: String
+    var title: String
+    var records: [TaskRecord]
+}
+
 struct TodoItem: Codable, Identifiable, Equatable {
     var id: UUID
     var title: String
@@ -44,6 +50,49 @@ struct TodoItem: Codable, Identifiable, Equatable {
     var completedAt: Date?
 
     var isCompleted: Bool { completedAt != nil }
+}
+
+struct DailyTodoPlan: Codable, Equatable {
+    var confirmedAt: Date?
+    var todos: [TodoItem]
+    var carriedYesterdayTodoIDs: [UUID]
+
+    init(
+        confirmedAt: Date? = nil,
+        todos: [TodoItem] = [],
+        carriedYesterdayTodoIDs: [UUID] = []
+    ) {
+        self.confirmedAt = confirmedAt
+        self.todos = todos
+        self.carriedYesterdayTodoIDs = carriedYesterdayTodoIDs
+    }
+}
+
+enum DailyPlanCalendar {
+    static let refreshHour = 3
+
+    static func dayKey(for date: Date, calendar: Calendar = .current) -> String {
+        let businessDate = calendar.date(byAdding: .hour, value: -refreshHour, to: date)!
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: businessDate)
+    }
+
+    static func previousDayKey(for date: Date, calendar: Calendar = .current) -> String {
+        let previousDate = calendar.date(byAdding: .day, value: -1, to: date)!
+        return dayKey(for: previousDate, calendar: calendar)
+    }
+
+    static func nextRefresh(after date: Date, calendar: Calendar = .current) -> Date? {
+        calendar.nextDate(
+            after: date,
+            matching: DateComponents(hour: refreshHour, minute: 0, second: 0),
+            matchingPolicy: .nextTime
+        )
+    }
 }
 
 enum TodoProgress {

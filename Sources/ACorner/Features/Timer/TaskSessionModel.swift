@@ -66,8 +66,11 @@ final class TaskSessionModel {
     }
 
     func start() {
+        store.refreshDayIfNeeded()
         let trimmedTitle = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedTitle.isEmpty, Self.plannedMinutesRange.contains(draftMinutes) else { return }
+        guard store.isTodayConfirmed,
+              !trimmedTitle.isEmpty,
+              Self.plannedMinutesRange.contains(draftMinutes) else { return }
 
         let now = Date()
         let linkedTodoID = store.pendingTodo(matchingTitle: trimmedTitle)?.id
