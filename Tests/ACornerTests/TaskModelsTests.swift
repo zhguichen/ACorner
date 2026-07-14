@@ -2,6 +2,19 @@ import Foundation
 import Testing
 @testable import ACorner
 
+private struct LegacyTodoFixture: Codable {
+    var id: UUID
+    var title: String
+    var createdAt: Date
+    var completedAt: Date?
+}
+
+private struct LegacyDailyPlanFixture: Codable {
+    var confirmedAt: Date?
+    var todos: [LegacyTodoFixture]
+    var carriedYesterdayTodoIDs: [UUID]
+}
+
 @Test("计划时长始终限制在 1 到 180 分钟")
 @MainActor
 func plannedMinutesAreClampedToSupportedRange() {
@@ -81,6 +94,30 @@ func dailyPlanDayChangesAtThreeAM() {
     #expect(DailyPlanCalendar.previousDayKey(for: afterRefresh, calendar: calendar) == "2026-07-11")
 }
 
+@Test("期限事项会区分未来、今天和仍待处理")
+func deadlineTimingUsesCalendarDays() {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+    let now = calendar.date(from: DateComponents(year: 2026, month: 7, day: 14, hour: 10))!
+    let yesterday = DeadlineItem(
+        id: UUID(),
+        title: "昨天截止",
+        dueDate: calendar.date(byAdding: .day, value: -1, to: now)!,
+        completedAt: nil
+    )
+    let today = DeadlineItem(id: UUID(), title: "今天截止", dueDate: now, completedAt: nil)
+    let tomorrow = DeadlineItem(
+        id: UUID(),
+        title: "明天截止",
+        dueDate: calendar.date(byAdding: .day, value: 1, to: now)!,
+        completedAt: nil
+    )
+
+    #expect(DeadlineTiming.status(for: yesterday, now: now, calendar: calendar) == .pending)
+    #expect(DeadlineTiming.status(for: today, now: now, calendar: calendar) == .today)
+    #expect(DeadlineTiming.status(for: tomorrow, now: now, calendar: calendar) == .upcoming)
+}
+
 @Test("确认今天会写入当天的待办计划")
 @MainActor
 func confirmingTodayWritesDailyTodoPlan() throws {
@@ -102,6 +139,171 @@ func confirmingTodayWritesDailyTodoPlan() throws {
     #expect(store.isTodayConfirmed)
     #expect(plan.confirmedAt != nil)
     #expect(plan.todos.map(\.title) == ["为今天留一隅"])
+}
+
+@Test("期限事项会写入独立本地文件")
+@MainActor
+func deadlineWritesToLocalFile() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ACornerTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let store = RecordStore(folderURL: folder)
+    let dueDate = Date(timeIntervalSince1970: 1_800_000_000)
+    store.addDeadline(title: "作业提交", dueDate: dueDate)
+
+    let data = try Data(contentsOf: folder.appendingPathComponent("ACornerDeadlines.json"))
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let deadlines = try decoder.decode([DeadlineItem].self, from: data)
+    #expect(deadlines.map(\.title) == ["作业提交"])
+    #expect(deadlines.first?.dueDate == dueDate)
+}
+
+@Test("过去未完成待办可加入今天且保留原记录")
+@MainActor
+func pastPendingTodoCanBeAddedToToday() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ACornerTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let pastTodo = TodoItem(id: UUID(), title: "补交作业", createdAt: .now, completedAt: nil)
+    let pastPlan = DailyTodoPlan(todos: [pastTodo])
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    let pastDayKey = DailyPlanCalendar.previousDayKey(for: Date())
+    let pastURL = folder.appendingPathComponent("ACornerTodos-\(pastDayKey).json")
+    try encoder.encode(pastPlan).write(to: pastURL)
+
+    let store = RecordStore(folderURL: folder)
+    #expect(store.pastPendingTodos.map(\.title) == ["补交作业"])
+
+    store.addPastTodo(id: pastTodo.id)
+
+    #expect(store.pendingTodos.map(\.title) == ["补交作业"])
+    #expect(store.pastPendingTodos.isEmpty)
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let restoredPastPlan = try decoder.decode(DailyTodoPlan.self, from: Data(contentsOf: pastURL))
+    #expect(restoredPastPlan.todos.count == 1)
+    #expect(restoredPastPlan.todos.first?.id == pastTodo.id)
+    #expect(restoredPastPlan.todos.first?.title == pastTodo.title)
+    #expect(restoredPastPlan.todos.first?.completedAt == nil)
+}
+
+@Test("同一待办跨日带入时只保留一个未完成入口")
+@MainActor
+func carriedTodoUsesOneLineageAcrossDays() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ACornerTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let originalID = UUID()
+    let lineageID = UUID()
+    let carriedID = UUID()
+    let original = TodoItem(
+        id: originalID,
+        title: "继续整理提案",
+        createdAt: .now,
+        completedAt: nil,
+        lineageID: lineageID
+    )
+    let carried = TodoItem(
+        id: carriedID,
+        title: "继续整理提案",
+        createdAt: .now,
+        completedAt: nil,
+        lineageID: lineageID
+    )
+    let calendar = Calendar.current
+    let olderDate = calendar.date(byAdding: .day, value: -1, to: Date())!
+    let olderDayKey = DailyPlanCalendar.previousDayKey(for: olderDate)
+    let yesterdayDayKey = DailyPlanCalendar.previousDayKey(for: Date())
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    try encoder.encode(DailyTodoPlan(todos: [original])).write(
+        to: folder.appendingPathComponent("ACornerTodos-\(olderDayKey).json")
+    )
+    try encoder.encode(DailyTodoPlan(todos: [carried])).write(
+        to: folder.appendingPathComponent("ACornerTodos-\(yesterdayDayKey).json")
+    )
+
+    let store = RecordStore(folderURL: folder)
+    #expect(store.pastPendingTodos.count == 1)
+    #expect(store.pastPendingTodos.first?.id == carriedID)
+
+    store.addPastTodo(id: carriedID)
+    store.addPastTodo(id: carriedID)
+    #expect(store.pendingTodos.count == 1)
+    #expect(store.pendingTodos.first?.lineageID == lineageID)
+    #expect(store.pastPendingTodos.isEmpty)
+
+    store.setTodoCompleted(id: store.pendingTodos[0].id, isCompleted: true)
+    #expect(store.pastPendingTodos.isEmpty)
+}
+
+@Test("旧版每日待办会迁移为带脉络标识的新结构")
+@MainActor
+func legacyDailyPlanIsMigratedWithBackup() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ACornerTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let legacyTodo = LegacyTodoFixture(id: UUID(), title: "旧待办", createdAt: .now, completedAt: nil)
+    let legacyPlan = LegacyDailyPlanFixture(confirmedAt: nil, todos: [legacyTodo], carriedYesterdayTodoIDs: [])
+    let dayKey = DailyPlanCalendar.previousDayKey(for: Date())
+    let planURL = folder.appendingPathComponent("ACornerTodos-\(dayKey).json")
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    try encoder.encode(legacyPlan).write(to: planURL)
+
+    _ = RecordStore(folderURL: folder)
+
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let migratedPlan = try decoder.decode(DailyTodoPlan.self, from: Data(contentsOf: planURL))
+    #expect(migratedPlan.todos.first?.lineageID == legacyTodo.id)
+    #expect(FileManager.default.fileExists(atPath: planURL.appendingPathExtension("backup-v1").path))
+}
+
+@Test("删除过去未完成会移除所有日期的未完成副本")
+@MainActor
+func deletingPastTodoLineageRemovesAllPendingCopies() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ACornerTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let lineageID = UUID()
+    let original = TodoItem(id: UUID(), title: "放弃的事项", createdAt: .now, completedAt: nil, lineageID: lineageID)
+    let carried = TodoItem(id: UUID(), title: "放弃的事项", createdAt: .now, completedAt: nil, lineageID: lineageID)
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    let calendar = Calendar.current
+    let olderDate = calendar.date(byAdding: .day, value: -1, to: Date())!
+    let olderURL = folder.appendingPathComponent(
+        "ACornerTodos-\(DailyPlanCalendar.previousDayKey(for: olderDate)).json"
+    )
+    let yesterdayURL = folder.appendingPathComponent(
+        "ACornerTodos-\(DailyPlanCalendar.previousDayKey(for: Date())).json"
+    )
+    try encoder.encode(DailyTodoPlan(todos: [original])).write(to: olderURL)
+    try encoder.encode(DailyTodoPlan(todos: [carried])).write(to: yesterdayURL)
+
+    let store = RecordStore(folderURL: folder)
+    store.deletePastTodoLineage(id: carried.id)
+
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let olderPlan = try decoder.decode(DailyTodoPlan.self, from: Data(contentsOf: olderURL))
+    let yesterdayPlan = try decoder.decode(DailyTodoPlan.self, from: Data(contentsOf: yesterdayURL))
+    #expect(store.pastPendingTodos.isEmpty)
+    #expect(olderPlan.todos.isEmpty)
+    #expect(yesterdayPlan.todos.isEmpty)
 }
 
 @Test("待办完成度按已完成数量计算")

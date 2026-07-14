@@ -33,6 +33,7 @@ struct DailyCheckInView: View {
                     }
 
                     yesterdayEcho
+                    deadlineRhythm
                     todayPlan
 
                     Button("开始今天") {
@@ -148,6 +149,37 @@ struct DailyCheckInView: View {
                 }
             }
         }
+    }
+
+    private var deadlineRhythm: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Everyday, in View", systemImage: "calendar")
+                .font(.callout.weight(.semibold))
+            Text("期限事项每天都会在这里，不会自动变成今天的待办。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if store.activeDeadlines.isEmpty {
+                Text("还没有期限事项。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(store.activeDeadlines) { deadline in
+                    HStack(spacing: 8) {
+                        Text(deadline.title)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text(deadline.dueText())
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                }
+            }
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("期限事项")
     }
 
     private func addTodo() {

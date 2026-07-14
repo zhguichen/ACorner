@@ -193,6 +193,7 @@ final class TaskSessionModel {
     }
 
     private func refreshPhase() {
+        store.refreshDayIfNeeded()
         guard let task = activeTask else {
             if phase != .wrapUp { setPhase(.idle) }
             return

@@ -45,11 +45,34 @@ struct TaskRecordDay: Identifiable, Equatable {
 
 struct TodoItem: Codable, Identifiable, Equatable {
     var id: UUID
+    var lineageID: UUID
     var title: String
     var createdAt: Date
     var completedAt: Date?
 
     var isCompleted: Bool { completedAt != nil }
+
+    init(
+        id: UUID,
+        title: String,
+        createdAt: Date,
+        completedAt: Date?,
+        lineageID: UUID? = nil
+    ) {
+        self.id = id
+        self.lineageID = lineageID ?? id
+        self.title = title
+        self.createdAt = createdAt
+        self.completedAt = completedAt
+    }
+}
+
+struct PastTodoItem: Identifiable, Equatable {
+    var id: UUID
+    var lineageID: UUID
+    var title: String
+    var sourceDayKey: String
+    var createdAt: Date
 }
 
 struct DailyTodoPlan: Codable, Equatable {
@@ -65,6 +88,42 @@ struct DailyTodoPlan: Codable, Equatable {
         self.confirmedAt = confirmedAt
         self.todos = todos
         self.carriedYesterdayTodoIDs = carriedYesterdayTodoIDs
+    }
+}
+
+struct DeadlineItem: Codable, Identifiable, Equatable {
+    var id: UUID
+    var title: String
+    var dueDate: Date
+    var completedAt: Date?
+
+    var isCompleted: Bool { completedAt != nil }
+}
+
+enum DeadlineTiming: Equatable {
+    case upcoming
+    case today
+    case pending
+
+    static func status(for deadline: DeadlineItem, now: Date = Date(), calendar: Calendar = .current) -> DeadlineTiming {
+        let deadlineDay = calendar.startOfDay(for: deadline.dueDate)
+        let today = calendar.startOfDay(for: now)
+        if deadlineDay < today { return .pending }
+        if calendar.isDate(deadlineDay, inSameDayAs: today) { return .today }
+        return .upcoming
+    }
+}
+
+extension DeadlineItem {
+    func dueText(now: Date = Date(), calendar: Calendar = .current) -> String {
+        switch DeadlineTiming.status(for: self, now: now, calendar: calendar) {
+        case .today:
+            "今天截止"
+        case .pending:
+            "仍待处理"
+        case .upcoming:
+            dueDate.formatted(.dateTime.month().day()) + " 截止"
+        }
     }
 }
 

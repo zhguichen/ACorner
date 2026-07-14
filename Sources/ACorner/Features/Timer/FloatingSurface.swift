@@ -192,9 +192,7 @@ struct FloatingSurface: View {
         if requiresDailyCheckIn {
             return "一隅，等待完成每日回顾与今日确认"
         }
-        if store.todoCount == 0 {
-            return "一隅，\(model.statusText)，暂无待办"
-        }
+        if store.todoCount == 0 { return "一隅，\(model.statusText)，暂无待办" }
         return "一隅，\(model.statusText)，待办完成 \(store.completedTodoCount) / \(store.todoCount)"
     }
 
@@ -336,12 +334,13 @@ private struct ActiveTimerProgressLine: View {
 
     let progress: Double
     let animationEndsAt: Date?
+    @State private var isAnimationActive = false
 
     var body: some View {
         GeometryReader { proxy in
             let fillWidth = proxy.size.width * min(max(progress, 0), 1)
             if fillWidth > 0 {
-                if let animationEndsAt, animationEndsAt > Date() {
+                if isAnimationActive {
                     TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
                         let phase = Self.animationPhase(at: context.date)
                         ZStack(alignment: .leading) {
@@ -376,6 +375,28 @@ private struct ActiveTimerProgressLine: View {
                         .frame(width: fillWidth)
                 }
             }
+        }
+        .task(id: animationEndsAt) {
+            guard let animationEndsAt else {
+                isAnimationActive = false
+                return
+            }
+
+            let remainingDuration = animationEndsAt.timeIntervalSinceNow
+            guard remainingDuration > 0 else {
+                isAnimationActive = false
+                return
+            }
+
+            isAnimationActive = true
+            do {
+                try await Task.sleep(for: .seconds(remainingDuration))
+            } catch {
+                return
+            }
+
+            guard !Task.isCancelled else { return }
+            isAnimationActive = false
         }
     }
 
