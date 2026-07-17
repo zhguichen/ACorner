@@ -8,6 +8,7 @@ struct FloatingSurface: View {
     let openSettings: () -> Void
     @State private var lastDragTranslation: CGSize = .zero
     @State private var isDragging = false
+    @State private var isShowingHourlyCheckInForm = false
 
     var body: some View {
         let cardIsVisible = model.isCardPresented
@@ -107,32 +108,46 @@ struct FloatingSurface: View {
 
     @ViewBuilder
     private var card: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !requiresDailyCheckIn {
-                HStack {
-                    Spacer(minLength: 0)
-                    Button {
-                        openSettings()
-                    } label: {
-                        Label("设置", systemImage: "gearshape")
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 10) {
+                if !requiresDailyCheckIn {
+                    HStack {
+                        Spacer(minLength: 0)
+                        Button {
+                            openSettings()
+                        } label: {
+                            Label("设置", systemImage: "gearshape")
+                        }
+                        .buttonStyle(.borderless)
                     }
-                    .buttonStyle(.borderless)
                 }
-            }
 
-            if requiresDailyCheckIn {
-                DailyCheckInView(store: store, compact: true)
-            } else {
-                Group {
-                    switch model.phase {
-                    case .idle:
-                        TaskInputCard(model: model, store: store)
-                    case .countdown, .overtime:
-                        ActiveTaskCard(model: model)
-                    case .waiting:
-                        WaitingCard(model: model)
-                    case .wrapUp:
-                        WrapUpCard(model: model)
+                if requiresDailyCheckIn {
+                    DailyCheckInView(store: store, compact: true)
+                } else {
+                    if let pending = model.pendingHourlyCheckIn {
+                        if isShowingHourlyCheckInForm {
+                            HourlyCheckInCard(model: model, scheduledAt: pending.scheduledAt)
+                        } else {
+                            HourlyCheckInReminder(scheduledAt: pending.scheduledAt) {
+                                isShowingHourlyCheckInForm = true
+                            }
+                        }
+                    }
+
+                    if !isShowingHourlyCheckInForm {
+                        Group {
+                            switch model.phase {
+                            case .idle:
+                                TaskInputCard(model: model, store: store)
+                            case .countdown, .overtime:
+                                ActiveTaskCard(model: model)
+                            case .waiting:
+                                WaitingCard(model: model)
+                            case .wrapUp:
+                                WrapUpCard(model: model)
+                            }
+                        }
                     }
                 }
             }
@@ -146,10 +161,14 @@ struct FloatingSurface: View {
         }
         .shadow(color: .black.opacity(0.16), radius: 18, y: 7)
         .accessibilityElement(children: .contain)
+        .onChange(of: model.pendingHourlyCheckIn?.id) { _, _ in
+            isShowingHourlyCheckInForm = false
+        }
     }
 
     private var anchorPrimaryText: String {
         if requiresDailyCheckIn { return "Daybreak" }
+        if model.hasPendingHourlyCheckIn { return "整点记录" }
         return switch model.phase {
         case .countdown, .waiting, .overtime:
             model.activeTask?.title ?? anchorStatusText
@@ -162,6 +181,7 @@ struct FloatingSurface: View {
 
     private var anchorStatusText: String {
         if requiresDailyCheckIn { return "待开启" }
+        if model.hasPendingHourlyCheckIn { return "待填写" }
         return switch model.phase {
         case .idle: "空闲"
         case .wrapUp: "待保存"
@@ -173,6 +193,7 @@ struct FloatingSurface: View {
 
     private var anchorTint: Color {
         if requiresDailyCheckIn { return Color(nsColor: .systemIndigo) }
+        if model.hasPendingHourlyCheckIn { return Color(nsColor: .systemOrange) }
         return switch model.phase {
         case .idle, .wrapUp: Color(nsColor: .systemGray)
         case .countdown: Color(nsColor: .systemGreen)
@@ -192,12 +213,82 @@ struct FloatingSurface: View {
         if requiresDailyCheckIn {
             return "一隅，等待完成每日回顾与今日确认"
         }
+        if model.hasPendingHourlyCheckIn {
+            return "一隅，整点记录待填写"
+        }
         if store.todoCount == 0 { return "一隅，\(model.statusText)，暂无待办" }
         return "一隅，\(model.statusText)，待办完成 \(store.completedTodoCount) / \(store.todoCount)"
     }
 
     private var requiresDailyCheckIn: Bool {
         model.phase == .idle && !store.isTodayConfirmed
+    }
+}
+
+private struct HourlyCheckInReminder: View {
+    let scheduledAt: Date
+    let beginRecording: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("整点记录待填写")
+                    .font(.callout.weight(.semibold))
+                Text("\(scheduledAt.formatted(.dateTime.hour().minute())) 这一小时在做什么？")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Button("去记录", action: beginRecording)
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+        }
+        .padding(10)
+        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("整点记录待填写")
+    }
+}
+
+private struct HourlyCheckInCard: View {
+    let model: TaskSessionModel
+    let scheduledAt: Date
+    @FocusState private var noteIsFocused: Bool
+
+    var body: some View {
+        @Bindable var model = model
+        VStack(alignment: .leading, spacing: 12) {
+            CardHeading(
+                eyebrow: "整点记录",
+                title: "刚才这一小时，你在做什么？",
+                status: scheduledAt.formatted(.dateTime.hour().minute())
+            )
+            TextEditor(text: $model.hourlyCheckInNote)
+                .focused($noteIsFocused)
+                .font(.callout)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .frame(minHeight: 112)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+                }
+                .accessibilityLabel("整点记录内容")
+                .onTapGesture {
+                    NSApp.activate(ignoringOtherApps: true)
+                    DispatchQueue.main.async {
+                        noteIsFocused = true
+                    }
+                }
+            HStack {
+                Spacer(minLength: 0)
+                Button("记录") { model.recordHourlyCheckIn() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .disabled(model.hourlyCheckInNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
     }
 }
 

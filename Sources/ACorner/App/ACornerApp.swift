@@ -20,12 +20,16 @@ struct ACornerApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let store = RecordStore()
+    private var model: TaskSessionModel?
     private var floatingPanel: FloatingPanelController?
     private var settingsWindow: NSWindow?
+    private var sleepObserver: NSObjectProtocol?
+    private var wakeObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         let model = TaskSessionModel(store: store)
+        self.model = model
         floatingPanel = FloatingPanelController(
             model: model,
             store: store,
@@ -33,11 +37,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.openSettingsWindow()
             }
         )
+        observeSleepWake()
         floatingPanel?.show()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    private func observeSleepWake() {
+        let notificationCenter = NSWorkspace.shared.notificationCenter
+        sleepObserver = notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.model?.pauseHourlyCheckInsForSleep()
+            }
+        }
+        wakeObserver = notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.model?.resumeHourlyCheckInsAfterWake()
+            }
+        }
     }
 
     private func openSettingsWindow() {

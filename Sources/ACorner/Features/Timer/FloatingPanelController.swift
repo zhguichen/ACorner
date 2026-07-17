@@ -63,6 +63,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         model.onRequestCollapse = { [weak self] in
             self?.collapse()
         }
+        model.onHourlyCheckInRequested = { [weak self] in
+            self?.presentHourlyCheckIn()
+        }
+        model.onHourlyCheckInResolved = { [weak self] in
+            self?.hourlyCheckInResolved()
+        }
         installOutsideClickMonitor()
         relayout()
     }
@@ -97,6 +103,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     func collapse() {
+        guard !model.hasPendingHourlyCheckIn else { return }
         presentationWorkItem?.cancel()
         dismissalWorkItem?.cancel()
         displayMode = .collapsed
@@ -129,12 +136,22 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             }
             presentCard()
         case .overtime:
-            collapse()
+            if !model.hasPendingHourlyCheckIn { collapse() }
         case .countdown:
-            if displayMode == .automatic { collapse() }
+            if displayMode == .automatic, !model.hasPendingHourlyCheckIn { collapse() }
         case .idle:
-            if displayMode == .automatic { collapse() }
+            if displayMode == .automatic, !model.hasPendingHourlyCheckIn { collapse() }
         }
+    }
+
+    private func presentHourlyCheckIn() {
+        displayMode = .automatic
+        presentCard()
+    }
+
+    private func hourlyCheckInResolved() {
+        guard !model.hasPendingHourlyCheckIn else { return }
+        collapse()
     }
 
     private func presentCard(focusAfterPresentation: Bool = false) {

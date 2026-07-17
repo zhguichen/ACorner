@@ -49,6 +49,21 @@ func taskRecordRoundTrip() throws {
     #expect(restored.linkedTodoID == linkedTodoID)
 }
 
+@Test("整点记录可稳定编码与解码")
+func hourlyCheckInRoundTrip() throws {
+    let checkIn = HourlyCheckIn(
+        id: UUID(),
+        scheduledAt: Date(timeIntervalSince1970: 1_700_100_000),
+        recordedAt: Date(timeIntervalSince1970: 1_700_100_045),
+        note: "在整理开发说明。"
+    )
+
+    let data = try JSONEncoder().encode(checkIn)
+    let restored = try JSONDecoder().decode(HourlyCheckIn.self, from: data)
+
+    #expect(restored == checkIn)
+}
+
 @Test("待办事项可稳定编码与解码")
 func todoItemRoundTrip() throws {
     let todo = TodoItem(
@@ -92,6 +107,16 @@ func dailyPlanDayChangesAtThreeAM() {
     #expect(DailyPlanCalendar.dayKey(for: beforeRefresh, calendar: calendar) == "2026-07-11")
     #expect(DailyPlanCalendar.dayKey(for: afterRefresh, calendar: calendar) == "2026-07-12")
     #expect(DailyPlanCalendar.previousDayKey(for: afterRefresh, calendar: calendar) == "2026-07-11")
+}
+
+@Test("下一个整点始终按自然整点计算")
+func nextHourUsesNaturalHourBoundary() {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+    let now = calendar.date(from: DateComponents(year: 2026, month: 7, day: 12, hour: 10, minute: 42, second: 18))!
+    let nextHour = calendar.date(from: DateComponents(year: 2026, month: 7, day: 12, hour: 11))!
+
+    #expect(DailyPlanCalendar.nextHour(after: now, calendar: calendar) == nextHour)
 }
 
 @Test("期限事项会区分未来、今天和仍待处理")
@@ -159,6 +184,35 @@ func deadlineWritesToLocalFile() throws {
     let deadlines = try decoder.decode([DeadlineItem].self, from: data)
     #expect(deadlines.map(\.title) == ["作业提交"])
     #expect(deadlines.first?.dueDate == dueDate)
+}
+
+@Test("整点记录按凌晨三点定义的一天写入本地文件")
+@MainActor
+func hourlyCheckInWritesToBusinessDayFile() throws {
+    let folder = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ACornerTests-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let calendar = Calendar.current
+    let today = Date()
+    let scheduledAt = calendar.date(bySettingHour: 2, minute: 0, second: 0, of: today)!
+    let checkIn = HourlyCheckIn(
+        id: UUID(),
+        scheduledAt: scheduledAt,
+        recordedAt: scheduledAt.addingTimeInterval(20),
+        note: "阅读资料"
+    )
+    let store = RecordStore(folderURL: folder)
+
+    try store.save(checkIn)
+
+    let dayKey = DailyPlanCalendar.dayKey(for: scheduledAt, calendar: calendar)
+    let data = try Data(contentsOf: folder.appendingPathComponent("ACornerCheckIns-\(dayKey).json"))
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let savedCheckIns = try decoder.decode([HourlyCheckIn].self, from: data)
+    #expect(savedCheckIns == [checkIn])
 }
 
 @Test("过去未完成待办可加入今天且保留原记录")

@@ -28,6 +28,10 @@ final class RecordStore {
         static func todos(for dayKey: String) -> String {
             "ACornerTodos-\(dayKey).json"
         }
+
+        static func checkIns(for dayKey: String) -> String {
+            "ACornerCheckIns-\(dayKey).json"
+        }
     }
 
     private(set) var folderURL: URL?
@@ -147,6 +151,19 @@ final class RecordStore {
         updatedRecords.sort { $0.startedAt > $1.startedAt }
         try saveRecords(updatedRecords, to: url)
         reloadRecords()
+    }
+
+    func save(_ checkIn: HourlyCheckIn) throws {
+        guard let folderURL else { return }
+        let url = checkInFileURL(for: checkIn.scheduledAt, in: folderURL)
+        var updatedCheckIns = try loadCheckIns(from: url)
+        if let index = updatedCheckIns.firstIndex(where: { $0.id == checkIn.id }) {
+            updatedCheckIns[index] = checkIn
+        } else {
+            updatedCheckIns.append(checkIn)
+        }
+        updatedCheckIns.sort { $0.scheduledAt < $1.scheduledAt }
+        try saveCheckIns(updatedCheckIns, to: url)
     }
 
     func removeRecord(_ record: TaskRecord) {
@@ -324,6 +341,20 @@ final class RecordStore {
         try encoder.encode(records).write(to: url, options: .atomic)
     }
 
+    private func loadCheckIns(from url: URL) throws -> [HourlyCheckIn] {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode([HourlyCheckIn].self, from: Data(contentsOf: url))
+    }
+
+    private func saveCheckIns(_ checkIns: [HourlyCheckIn], to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(checkIns).write(to: url, options: .atomic)
+    }
+
     private func reloadRecords() {
         guard let folderURL else {
             records = []
@@ -344,6 +375,10 @@ final class RecordStore {
 
     private func recordFileURL(for date: Date, in folderURL: URL) -> URL {
         folderURL.appendingPathComponent("ACornerTasks-\(Self.dayKey(for: date)).json")
+    }
+
+    private func checkInFileURL(for date: Date, in folderURL: URL) -> URL {
+        folderURL.appendingPathComponent(FileName.checkIns(for: DailyPlanCalendar.dayKey(for: date)))
     }
 
     private static func dayKey(for date: Date) -> String {

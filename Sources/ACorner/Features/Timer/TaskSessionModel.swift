@@ -9,6 +9,11 @@ private struct SavedSession: Codable {
     var draftMinutes: Int
 }
 
+struct PendingHourlyCheckIn: Identifiable, Equatable {
+    let id: UUID
+    let scheduledAt: Date
+}
+
 @MainActor
 @Observable
 final class TaskSessionModel {
@@ -21,6 +26,8 @@ final class TaskSessionModel {
     private let store: RecordStore
     private var phaseTimer: Timer?
     private var refreshTimer: Timer?
+    private var hourlyCheckInTimer: Timer?
+    private var pendingHourlyCheckIns: [PendingHourlyCheckIn] = []
 
     var phase: TaskPhase = .idle
     var activeTask: ActiveTask?
@@ -31,9 +38,15 @@ final class TaskSessionModel {
     var focusRequest = 0
     var isCardPresented = false
     var isCardHostExpanded = false
+    var hourlyCheckInNote = ""
+
+    var pendingHourlyCheckIn: PendingHourlyCheckIn? { pendingHourlyCheckIns.first }
+    var hasPendingHourlyCheckIn: Bool { pendingHourlyCheckIn != nil }
 
     var onPhaseChanged: ((TaskPhase) -> Void)?
     var onRequestCollapse: (() -> Void)?
+    var onHourlyCheckInRequested: (() -> Void)?
+    var onHourlyCheckInResolved: (() -> Void)?
 
     init(store: RecordStore) {
         self.store = store
@@ -53,6 +66,7 @@ final class TaskSessionModel {
                 self?.refreshPhase()
             }
         }
+        scheduleHourlyCheckIn()
     }
 
     var statusText: String {
@@ -155,6 +169,21 @@ final class TaskSessionModel {
         persistSession()
     }
 
+    func recordHourlyCheckIn() {
+        let note = hourlyCheckInNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !note.isEmpty, let pending = pendingHourlyCheckIn else { return }
+        saveHourlyCheckIn(pending, note: note)
+    }
+
+    func pauseHourlyCheckInsForSleep() {
+        hourlyCheckInTimer?.invalidate()
+        hourlyCheckInTimer = nil
+    }
+
+    func resumeHourlyCheckInsAfterWake() {
+        scheduleHourlyCheckIn()
+    }
+
     func fuzzyTimeText(now: Date = Date()) -> String {
         guard let activeTask else { return "" }
         let interval: TimeInterval
@@ -194,6 +223,10 @@ final class TaskSessionModel {
 
     private func refreshPhase() {
         store.refreshDayIfNeeded()
+        if !store.isTodayConfirmed {
+            pendingHourlyCheckIns.removeAll()
+            hourlyCheckInNote = ""
+        }
         guard let task = activeTask else {
             if phase != .wrapUp { setPhase(.idle) }
             return
@@ -226,6 +259,44 @@ final class TaskSessionModel {
             Task { @MainActor [weak self] in
                 self?.refreshPhase()
             }
+        }
+    }
+
+    private func scheduleHourlyCheckIn() {
+        hourlyCheckInTimer?.invalidate()
+        guard let nextHour = DailyPlanCalendar.nextHour(after: Date()) else { return }
+        let timer = Timer(fire: nextHour, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.requestHourlyCheckIn(at: nextHour)
+            }
+        }
+        hourlyCheckInTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func requestHourlyCheckIn(at scheduledAt: Date) {
+        defer { scheduleHourlyCheckIn() }
+        store.refreshDayIfNeeded(now: scheduledAt)
+        guard store.isTodayConfirmed else { return }
+        pendingHourlyCheckIns.append(PendingHourlyCheckIn(id: UUID(), scheduledAt: scheduledAt))
+        onHourlyCheckInRequested?()
+    }
+
+    private func saveHourlyCheckIn(_ pending: PendingHourlyCheckIn, note: String) {
+        guard store.ensureFolder() else { return }
+        let checkIn = HourlyCheckIn(
+            id: pending.id,
+            scheduledAt: pending.scheduledAt,
+            recordedAt: Date(),
+            note: note
+        )
+        do {
+            try store.save(checkIn)
+            pendingHourlyCheckIns.removeFirst()
+            hourlyCheckInNote = ""
+            onHourlyCheckInResolved?()
+        } catch {
+            store.presentWriteError(error)
         }
     }
 

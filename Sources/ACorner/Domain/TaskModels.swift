@@ -37,6 +37,13 @@ struct TaskRecord: Codable, Identifiable, Equatable {
     var linkedTodoID: UUID? = nil
 }
 
+struct HourlyCheckIn: Codable, Identifiable, Equatable {
+    var id: UUID
+    var scheduledAt: Date
+    var recordedAt: Date
+    var note: String
+}
+
 struct TaskRecordDay: Identifiable, Equatable {
     var id: String
     var title: String
@@ -149,6 +156,14 @@ enum DailyPlanCalendar {
         calendar.nextDate(
             after: date,
             matching: DateComponents(hour: refreshHour, minute: 0, second: 0),
+            matchingPolicy: .nextTime
+        )
+    }
+
+    static func nextHour(after date: Date, calendar: Calendar = .current) -> Date? {
+        calendar.nextDate(
+            after: date,
+            matching: DateComponents(minute: 0, second: 0),
             matchingPolicy: .nextTime
         )
     }
